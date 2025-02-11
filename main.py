@@ -113,19 +113,38 @@
 from fastapi import FastAPI, HTTPException
 import tensorflow as tf
 import numpy as np
+import yfinance as yf
 from pydantic import BaseModel
 
 # Load Models
 models = {
-    "reliance": tf.keras.models.load_model("models/RELIANCE.NS.h5"),
-    "infosys": tf.keras.models.load_model("models/INFY.NS.h5"),
-    "tcs": tf.keras.models.load_model("models/TCS.NS.h5"),
+    "reliance": tf.keras.models.load_model("backend/models/RELIANCE.NS.h5"),
+    "infosys": tf.keras.models.load_model("backend/models/INFY.NS.h5"),
+    "tcs": tf.keras.models.load_model("backend/models/TCS.NS.h5"),
 }
+
+risk_model = tf.keras.models.load_model("backend/models/riskmanagement.h5")
+sentiment_model = tf.keras.models.load_model("backend/models/sentiment_analysis.h5")
 
 app = FastAPI()
 
 class StockInput(BaseModel):
     features: list[float]  # Assuming input is a list of float values
+
+# Mapping company names to their Yahoo Finance ticker symbols
+ticker_mapping = {
+    "reliance": "RELIANCE.NS",
+    "infosys": "INFY.NS",
+    "tcs": "TCS.NS",
+}
+
+def get_real_time_price(ticker):
+    """Fetches the real-time stock price from Yahoo Finance."""
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.history(period="1d")["Close"].iloc[-1]  # Get last closing price
+    except Exception as e:
+        return None  # Handle errors if Yahoo Finance API fails
 
 @app.get("/")
 def home():
@@ -134,10 +153,32 @@ def home():
 @app.post("/predict/{company}")
 def predict_stock(company: str, data: StockInput):
     if company not in models:
-        raise HTTPException(status_code=404, detail="Model not found")
-    
+        raise HTTPException(status_code=404, detail="Company model not found")
+
     model = models[company]
-    input_data = np.array(data.features).reshape(1, -1)  # Adjust input shape as required
-    prediction = model.predict(input_data)
-    
-    return {"company": company, "prediction": prediction.tolist()}
+    input_data = np.array(data.features).reshape(1, -1)
+
+    # Predict stock price
+    predicted_price = model.predict(input_data)[0][0]
+
+    # Get real-time actual stock price
+    actual_price = get_real_time_price(ticker_mapping[company])
+    if actual_price is None:
+        return {"error": "Failed to fetch real-time price"}
+
+    # Predict risk score
+    risk_score = risk_model.predict(input_data)[0][0]
+    risk_level = "Low" if risk_score < 0.4 else "Medium" if risk_score < 0.7 else "High"
+
+    # Predict sentiment
+    sentiment_score = sentiment_model.predict(input_data)[0][0]
+    sentiment = "Positive" if sentiment_score > 0.5 else "Negative"
+
+    return {
+        "company": company,
+        "actual_price": round(actual_price, 2),
+        "predicted_price": round(predicted_price, 2),
+        "risk_score": round(risk_score, 2),
+        "risk_level": risk_level,
+        "sentiment": sentiment
+    }
